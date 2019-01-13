@@ -23,8 +23,8 @@ def get_dynip(ifconfig_provider):
   similar to curl ifconfig.me/ip, see example.config.py for details to ifconfig providers
   '''
   r = requests.get(ifconfig_provider)
-  print('Checking dynamic IP: ' , r._contentt.decode("utf-8").strip('\n'))
-  return r.contentt.decode("utf-8").strip('\n')
+  print('Checking dynamic IP: ' , r._content.decode("utf-8").strip('\n'))
+  return r.content.decode("utf-8").strip('\n')
 
 def get_uuid(config, domain):
   '''
