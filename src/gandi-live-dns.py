@@ -17,12 +17,27 @@ import configparser
 import json
 import requests
 import pprint
+import socket
+from unittest.mock import patch
 
-def get_dynip(ifconfig_provider):
+orig_getaddrinfo = socket.getaddrinfo
+
+def getaddrinfoIPv6(host, port, family=0, type=0, proto=0, flags=0):
+  return orig_getaddrinfo(host=host, port=port, family=socket.AF_INET6, type=type, proto=proto, flags=flags)
+
+def getaddrinfoIPv4(host, port, family=0, type=0, proto=0, flags=0):
+  return orig_getaddrinfo(host=host, port=port, family=socket.AF_INET, type=type, proto=proto, flags=flags)
+
+def get_dynip(ifconfig_provider, ip_version):
   ''' find out own IPv4 at home <-- this is the dynamic IP which changes more or less frequently
   similar to curl ifconfig.me/ip, see example.config.py for details to ifconfig providers
   '''
-  r = requests.get(ifconfig_provider)
+  if ip_version == "ipv6":
+    with patch('socket.getaddrinfo', side_effect=getaddrinfoIPv6):
+      r = requests.get(ifconfig_provider)
+  elif ip_version == "ipv4":
+    with patch('socket.getaddrinfo', side_effect=getaddrinfoIPv4):
+      r = requests.get(ifconfig_provider)
   print('Checking dynamic IP: ' , r._content.decode("utf-8").strip('\n'))
   return r.content.decode("utf-8").strip('\n')
 
@@ -40,10 +55,11 @@ def get_uuid(config, domain):
     return json_object['zone_uuid']
   else:
     print('Error: HTTP Status Code ', u.status_code, 'when trying to get Zone UUID')
+    pprint.pprint(json_object)
     print(json_object['message'])
     exit()
 
-def get_dnsip(uuid, domain, subdomains, config):
+def get_dnsip(uuid, domain, subdomains, record, config):
   ''' find out IP from first Subdomain DNS-Record
   List all records with name "NAME" and type "TYPE" in the zone UUID
   GET /zones/<UUID>/records/<NAME>/<TYPE>:
@@ -52,7 +68,7 @@ def get_dnsip(uuid, domain, subdomains, config):
   the actual DNS Record IP
   '''
 
-  url = config["Gandi"]["api_endpoint"] + '/zones/' + uuid + '/records/' + subdomains[0] + '/A'
+  url = config["Gandi"]["api_endpoint"] + '/zones/' + uuid + '/records/' + subdomains[0] + '/' + record
   headers = {"X-Api-Key":config["Gandi"]["api_secret"]}
   u = requests.get(url, headers=headers)
   if u.status_code == 200:
@@ -64,7 +80,7 @@ def get_dnsip(uuid, domain, subdomains, config):
     print(json_object['message'])
     exit()
 
-def update_records(uuid, dynIP, subdomain, config):
+def update_records(uuid, dynIP, record, subdomain, config):
   ''' update DNS Records for Subdomains
     Change the "NAME"/"TYPE" record from the zone UUID
     PUT /zones/<UUID>/records/<NAME>/<TYPE>:
@@ -74,7 +90,7 @@ def update_records(uuid, dynIP, subdomain, config):
                      "rrset_values": ["<VALUE>"]}' \
                 https://dns.gandi.net/api/v5/zones/<UUID>/records/<NAME>/<TYPE>
   '''
-  url = config["Gandi"]["api_endpoint"] + '/zones/' + uuid + '/records/' + subdomain + '/A'
+  url = config["Gandi"]["api_endpoint"] + '/zones/' + uuid + '/records/' + subdomain + '/' + record
   payload = {"rrset_ttl": config["Gandi"]["ttl"], "rrset_values": [dynIP]}
   headers = {"Content-Type": "application/json", "X-Api-Key":config["Gandi"]["api_secret"]}
   u = requests.put(url, data=json.dumps(payload), headers=headers)
@@ -94,28 +110,31 @@ def main(config_file, force_update, verbosity):
 
   config = configparser.ConfigParser()
   config.read(config_file)
-  dynIP = get_dynip(config["Gandi"]["ifconfig"])
   domains = json.loads(config.get("Gandi","domains"))
-  for domain in domains:
-    subdomains = json.loads(config.get(domain,"subdomains"))
+  for ip_version, record in [ ("ipv4", "A"), ("ipv6", "AAAA") ]:
+    if not config.has_option("Gandi", "ifconfig_" + ip_version):
+      continue
+    dynIP = get_dynip(config["Gandi"]["ifconfig_" + ip_version], ip_version)
+    for domain in domains:
+      subdomains = json.loads(config.get(domain,"subdomains"))
 
-    #get zone ID from Account
-    uuid = get_uuid(config, domain)
+      #get zone ID from Account
+      uuid = get_uuid(config, domain)
 
-    #compare dynIP and DNS IP
-    dnsIP = get_dnsip(uuid, domain, subdomains, config)
+      #compare dynIP and DNS IP
+      dnsIP = get_dnsip(uuid, domain, subdomains, record, config)
 
-    if force_update:
-      print("Going to update/create the DNS Records for the subdomains")
-      for sub in subdomains:
-        update_records(uuid, dynIP, sub, config)
-    else:
-      if dynIP == dnsIP:
-        print("IP Address Match - no further action")
-      else:
-        print("IP Address Mismatch - going to update the DNS Records for the subdomains with new IP", dynIP)
+      if force_update:
+        print("Going to update/create the DNS Records for the subdomains")
         for sub in subdomains:
-          update_records(uuid, dynIP, sub, config)
+          update_records(uuid, dynIP, record, sub, config)
+      else:
+        if dynIP == dnsIP:
+          print("IP Address Match - no further action")
+        else:
+          print("IP Address Mismatch - going to update the DNS Records for the subdomains with new IP", dynIP)
+          for sub in subdomains:
+            update_records(uuid, dynIP, record, sub, config)
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
